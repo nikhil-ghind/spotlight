@@ -1,0 +1,54 @@
+# Spotlight configuration
+# All hyperparameters for the two-tower retrieval system live here.
+# Loaded by every CLI script via `load_config()` in scripts/_common helpers.
+
+data:
+  # Synthetic-data generation parameters.
+  n_users: 20000          # number of distinct users
+  n_items: 50000          # number of distinct items (catalog size, 50K+)
+  n_interactions: 400000  # number of positive (user, item) interaction logs
+  n_latent: 16            # dimensionality of the hidden affinity space used to
+                          # generate signal the towers can actually learn
+  # Categorical feature cardinalities.
+  user_n_countries: 40
+  user_n_age_buckets: 8
+  item_n_categories: 64
+  item_n_brands: 500
+  # Numeric feature counts.
+  user_n_numeric: 6
+  item_n_numeric: 8
+  # Fraction of interactions held out for evaluation (per-user leave-out).
+  val_frac: 0.1
+  # Output locations (relative to the spotlight/ root).
+  out_dir: data/artifacts
+
+model:
+  embedding_dim: 64        # shared embedding-space dimension (user emb = item emb)
+  feature_embedding_dim: 16  # per categorical-field embedding width
+  tower_hidden: [256, 128] # MLP hidden layer sizes inside each tower
+  dropout: 0.1
+  l2_normalize: true       # L2-normalize tower outputs so dot product == cosine sim
+
+train:
+  batch_size: 1024         # large batch => more in-batch negatives per step
+  lr: 0.001
+  weight_decay: 0.00001
+  epochs: 5
+  temperature: 0.07        # softmax temperature τ for the contrastive loss
+  num_workers: 4
+  grad_clip: 5.0
+  log_every: 50            # log training metrics every N steps
+  seed: 42
+  out_dir: checkpoints
+
+index:
+  # FAISS index settings used by build_index.py and serve.py.
+  type: ivf               # "flat" (exact, IndexFlatIP) or "ivf" (approximate, IndexIVFFlat)
+  nlist: 256              # number of Voronoi cells (clusters) for IVF
+  nprobe: 16             # cells visited at query time (recall/latency knob)
+  metric: ip             # "ip" (inner product) — valid because embeddings are L2-normalized
+  out_dir: index/artifacts
+
+eval:
+  ks: [10, 50]           # Recall@K cutoffs to report
+  seed: 42
