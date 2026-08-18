@@ -8,6 +8,55 @@ that are refreshed nightly into a **FAISS** index, enabling **sub-millisecond**
 approximate-nearest-neighbor (ANN) candidate retrieval at serve time. Quality is
 measured with **Recall@10**, **Recall@50**, and **MRR**.
 
+## Architecture
+
+```mermaid
+flowchart TB
+    subgraph offline["Offline — training"]
+        gen["scripts/generate_data.py<br/>synthetic.py: 20k users, 50k items,<br/>400k positive interactions from a<br/>16-dim latent affinity space"]
+        ds["data/dataset.py<br/>positive pairs + collate"]
+        tr["scripts/train.py<br/>batch 1024, temperature 0.07,<br/>AdamW + grad clip"]
+        ut["UserTower<br/>categorical embeddings + numeric<br/>MLP 256-128, L2 normalised"]
+        it["ItemTower<br/>same shape, separate weights"]
+        loss["compute_loss<br/>U x V transposed / tau<br/>cross-entropy against the diagonal<br/>(in-batch negatives)"]
+        ck["checkpoints/two_tower_best.pt<br/>weights + FeatureSpec"]
+    end
+
+    subgraph nightly["Nightly — index refresh"]
+        bi["scripts/build_index.py<br/>embed_all_items over the full catalog"]
+        fi["ItemIndex<br/>IndexFlatIP or IndexIVFFlat<br/>nlist 256, metric inner product"]
+        art["index/artifacts/items.faiss<br/>+ item id mapping"]
+    end
+
+    subgraph online["Serving"]
+        srv["scripts/serve.py<br/>load checkpoint + index"]
+        ue["one user-tower forward pass"]
+        ann["index.search, nprobe 16<br/>timed over 200 trials"]
+        topk["top-k item ids"]
+    end
+
+    ev["eval/evaluate.py + metrics.py<br/>Recall@10, Recall@50, MRR<br/>against held-out interactions"]
+
+    gen --> ds --> tr
+    tr --> ut
+    tr --> it
+    ut -->|"u"| loss
+    it -->|"v"| loss
+    loss -->|"gradients"| ut
+    loss -->|"gradients"| it
+    tr --> ck
+    ck --> bi
+    it -.->|"item tower only"| bi
+    bi --> fi --> art
+    ck --> srv
+    art --> srv
+    srv --> ue --> ann --> topk
+    art --> ev
+    ck --> ev
+```
+
+Because both towers L2-normalise their output, the dot product is cosine similarity, which is why the FAISS index can use an inner-product metric.
+
 ## What is two-tower retrieval?
 
 Scoring every user against millions of items with one heavy model is too slow
@@ -15,48 +64,6 @@ online. Two-tower retrieval splits the work: a user tower and an item tower each
 map features into the *same* embedding space, relevance is just a dot product,
 and item embeddings are precomputed so serving is one user-tower forward pass
 plus an ANN lookup.
-
-```
-┌────────────────────────────────────────────────────────────────────┐
-│                    Spotlight two-tower retrieval                     │
-│                                                                      │
-│  User features                              Item features            │
-│  (country, age,            ┌─ shared ─┐     (category, brand,        │
-│   numeric...)              │ embedding │      numeric...)            │
-│       │                    │   space   │           │                 │
-│       ▼                    │   (R^d)   │           ▼                 │
-│  ┌──────────┐              │           │      ┌──────────┐           │
-│  │ UserTower│ ──► u ───────┼──► u·v ◄──┼───── v ◄──│ItemTower│       │
-│  │  f_θ     │   (L2-norm)  │  = cosine │   (L2-norm)│  g_φ    │       │
-│  └──────────┘              └───────────┘            └──────────┘     │
-│                                                                      │
-│  TRAINING: in-batch negatives — items of other users in the batch    │
-│            act as negatives;  L = cross-entropy(U·Vᵀ / τ, diag)       │
-│                                                                      │
-│  NIGHTLY:  item tower embeds ALL 50K+ items ──► FAISS index           │
-│                                                                      │
-│  SERVING:  user emb ──► FAISS ANN search ──► top-k recommended items  │
-│            (sub-millisecond)                                         │
-└────────────────────────────────────────────────────────────────────┘
-```
-
-### Nightly refresh pipeline
-
-```
-  interaction logs
-        │
-        ▼
-   ┌─────────┐     ┌──────────────────┐     ┌──────────────────┐
-   │  train  │ ──► │ embed ALL items  │ ──► │ build FAISS index │
-   │ 2-tower │     │  (item tower)    │     │   (IVFFlat / IP)  │
-   └─────────┘     └──────────────────┘     └──────────────────┘
-                                                     │
-                                                     ▼
-                                            ┌──────────────────┐
-                                            │ persist + deploy │
-                                            │  items.faiss     │
-                                            └──────────────────┘
-```
 
 ## Project Structure
 
